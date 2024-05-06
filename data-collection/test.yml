@@ -1,0 +1,75 @@
+---
+- name: Generate and Send Monthly Report
+  hosts: nodes
+  gather_facts: yes
+  tasks:
+
+    - name: Generate report if it's the first Sunday
+      block:
+        - name: Get hostname
+          command: hostname
+          register: hostname_output
+
+        - name: Get current date
+          command: date "+%Y-%m-%d"
+          register: date_output
+
+        - name: Get OS information
+          setup:
+            filter: ansible_distribution
+
+        - name: Set facts based on OS
+          set_fact:
+            is_ubuntu: "{{ 'Ubuntu' in ansible_distribution }}"
+            is_centos: "{{ 'CentOS' in ansible_distribution }}"
+
+        - name: Determine which AV is available
+          set_fact:
+            av_command: "{{ item }}"
+          loop:
+            - "kaspersky --version && kaspersky --last-update"
+            - "falcon_sensor_command"
+          when: "{{ item.split(' ')[0] in ansible_pkg_mgr }}"
+          vars:
+            ansible_pkg_mgr: "{{ 'apt' if is_ubuntu else 'yum' }}"
+          register: av_command_result
+          ignore_errors: true
+
+        - name: Get AV information
+          command: "{{ av_command }}"
+          register: av_output
+          ignore_errors: true
+
+        - name: Get storage states
+          command: df -h
+          register: storage_output
+
+        - name: Get available updates
+          command: "{{ 'apt list --upgradable' if is_ubuntu else 'yum check-update' }}"
+          register: update_output
+          ignore_errors: true
+
+        - name: Generate report file
+          template:
+            src: monthly_report.j2
+            dest: /tmp/monthly_report.txt
+          vars:
+            hostname: "{{ hostname_output.stdout }}"
+            date: "{{ date_output.stdout }}"
+            storage_states: "{{ storage_output.stdout }}"
+            available_updates: "{{ update_output.stdout }}"
+            av_info: "{{ av_output.stdout }}"
+      delegate_to: localhost
+
+    - name: Send report via email
+      mail:
+        host: smtp.example.com
+        port: 25
+        subject: Monthly Report - {{ ansible_date_time.month }}
+        body: |
+          Please find attached the monthly report.
+        attach:
+          - /tmp/monthly_report.txt
+        from: ansible@example.com
+        to: admin@example.com
+      delegate_to: localhost
