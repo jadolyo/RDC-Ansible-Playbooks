@@ -1,70 +1,74 @@
 ---
 - name: Generate and Send Monthly Report
-  hosts: nodes
+  hosts: all
   gather_facts: yes
   tasks:
-    - name: Check if it's the first Sunday of the month
-      command: date +%u
-      register: today
-      changed_when: false
+    - name: Get hostname
+      command: hostname
+      register: hostname_output
 
-    - name: Generate report if it's the first Sunday
-      when: today.stdout == "7"
-      block:
-        - name: Get hostname
-          command: hostname
-          register: hostname_output
+    - name: Get current date
+      command: date "+%Y-%m-%d"
+      register: date_output
 
-        - name: Get current date
-          command: date "+%Y-%m-%d"
-          register: date_output
+    - name: Get OS information
+      setup:
+        filter: ansible_distribution
 
-        - name: Get OS information
-          setup:
-            filter: ansible_distribution
+    - name: Set facts based on OS
+      set_fact:
+        is_ubuntu: "{{ 'Ubuntu' in ansible_distribution }}"
+        is_centos: "{{ 'CentOS' in ansible_distribution }}"
+        is_rhel: "{{ 'RedHat' in ansible_distribution }}"
 
-        - name: Set facts based on OS
-          set_fact:
-            is_ubuntu: "{{ 'Ubuntu' in ansible_distribution }}"
-            is_centos: "{{ 'CentOS' in ansible_distribution }}"
+    - name: Check if CrowdStrike Falcon is installed
+      command: falcon_sensor_command --version
+      register: crowdstrike_output
+      ignore_errors: yes
 
-        - name: Determine which AV is available
-          set_fact:
-            av_command: "{{ item }}"
-          loop:
-            - "kaspersky --version && kaspersky --last-update"
-            - "falcon_sensor_command"
-          when: "{{ item.split(' ')[0] in ansible_pkg_mgr }}"
-          vars:
-            ansible_pkg_mgr: "{{ 'apt' if is_ubuntu else 'yum' }}"
-          register: av_command_result
-          ignore_errors: true
+    - name: Check if Kaspersky is installed
+      command: kaspersky --version
+      register: kaspersky_output
+      ignore_errors: yes
 
-        - name: Get AV information
-          command: "{{ av_command }}"
-          register: av_output
-          ignore_errors: true
+    - name: Set AV information
+      set_fact:
+        av_info: "{{ crowdstrike_output.stdout if crowdstrike_output.stdout else kaspersky_output.stdout }}"
+      when: crowdstrike_output.stdout or kaspersky_output.stdout
 
-        - name: Get storage states
-          command: df -h
-          register: storage_output
+    - name: Generate AV information message
+      set_fact:
+        av_info_msg: "{{ av_info | default('No AV installed') }}"
 
-        - name: Get available updates
-          command: "{{ 'apt list --upgradable' if is_ubuntu else 'yum check-update' }}"
-          register: update_output
-          ignore_errors: true
+    - name: Get storage states
+      command: df -h
+      register: storage_output
 
-        - name: Generate report file
-          template:
-            src: monthly_report.j2
-            dest: /tmp/monthly_report.txt
-          vars:
-            hostname: "{{ hostname_output.stdout }}"
-            date: "{{ date_output.stdout }}"
-            storage_states: "{{ storage_output.stdout }}"
-            available_updates: "{{ update_output.stdout }}"
-            av_info: "{{ av_output.stdout }}"
+    - name: Get available updates
+      command: "{{ 'apt list --upgradable' if is_ubuntu else ('yum check-update' if is_centos or is_rhel else '') }}"
+      register: update_output
+      ignore_errors: true
+
+    - name: Generate report content for current VM
+      template:
+        src: monthly_report_content.j2
+        dest: "/tmp/monthly_report_{{ ansible_hostname }}.txt"
+      vars:
+        hostname: "{{ ansible_hostname }}"
+        date: "{{ date_output.stdout }}"
+        storage_states: "{{ storage_output.stdout }}"
+        available_updates: "{{ update_output.stdout }}"
+        av_info: "{{ av_info_msg }}"
       delegate_to: localhost
+
+    - name: Concatenate all VMs report files into one
+      assemble:
+       src: /tmp/
+       dest: /tmp/monthly_report_all_vms.txt
+       regexp: monthly_report_.*\.txt
+      run_once: true
+      delegate_to: localhost
+      failed_when: false
 
     - name: Send report via email
       mail:
@@ -74,7 +78,7 @@
         body: |
           Please find attached the monthly report.
         attach:
-          - /tmp/monthly_report.txt
+          - /tmp/monthly_report_all_vms.txt
         from: ansible@example.com
         to: admin@example.com
       delegate_to: localhost
